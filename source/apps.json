@@ -1,0 +1,19 @@
+{
+  "$schema": "https://github.com/SideStore/sidestore-source-types/raw/main/schema.json",
+  "name": "Pwnagotchi.app",
+  "subtitle": "Pwnagotchi iOS Client",
+  "description": "Ein Pwnagotchi-Client für iOS, watchOS, iPadOS & macOS",
+  "iconURL": "https://raw.githubusercontent.com/MacherG7/pwnagotchi.app/main/Assets.xcassets/AppIcon.appiconset/icon_1024.png",
+  "apps": [
+    {
+      "bundleIdentifier": "io.pwnagotchi.app",
+      "name": "Pwnagotchi",
+      "version": "1.0.0",
+      "changelog": "Erste Veröffentlichung als SideStore-Build",
+      "downloadURL": "https://github.com/MacherG7/pwnagotchi.app/releases/download/v1.0.0/Pwnagotchi.app.ipa",
+      "minimumOSVersion": "13.0",
+      "size": 0  /* optional: Dateigröße in Bytes */
+    }
+  ],
+  "news": []
+}
