@@ -1,97 +1,126 @@
-name: Build & Release Pwnagotchi.app
+name: CI & Release iOS Pwnagotchi
+
+# Abbrechen älterer Läufe desselben Workflows
+concurrency:
+  group: pwnagotchi-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   push:
     tags:
       - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+
+env:
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+  BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+  DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+  EXPORT_METHOD: ad-hoc
 
 jobs:
-  build-and-release:
+  build:
+    name: Build .ipa
     runs-on: macos-latest
-    env:
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
-      DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-      EXPORT_METHOD: ${{ secrets.EXPORT_METHOD }}
-
+    outputs:
+      ipa-path: ${{ steps.export.outputs.ipa-path }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set up signing\n📋
-      run: |
-        sudo xcode-select -switch /Applications/Xcode.app
-        security create-keychain -p "" build.keychain
-        security default-keychain -s build.keychain
-        security unlock-keychain -p "" build.keychain
-        security import <(echo $APPLE_PASSWORD | base64 --decode) \
-          -k build.keychain \
-          -P "" -T /usr/bin/codesign
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
 
-    - name: Build .ipa via xcodebuild  
-      run: |
-        xcodebuild \
-          -workspace ios-pwnagotchi.xcodeproj \
-          -scheme Pwnagotchi \
-          -configuration Release \
-          -derivedDataPath build \
-          -sdk iphoneos \
-          CODE_SIGN_STYLE=Automatic \
-          DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-          PROVISIONING_PROFILE_SPECIFIER="" \
-          -allowProvisioningUpdates \
-          archive -archivePath build/Pwnagotchi.xcarchive
+      - name: Install Pods
+        run: |
+          cd ios
+          pod install --repo-update
 
-        xcodebuild \
-          -exportArchive \
-          -archivePath build/Pwnagotchi.xcarchive \
-          -exportPath build/Pwnagotchi \
-          -exportOptionsPlist <<EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" 
-          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>method</key>
-            <string>${EXPORT_METHOD}</string>
-          <key>signingStyle</key>
-            <string>manual</string>
-          <key>teamID</key>
-            <string>${DEVELOPMENT_TEAM}</string>
-          <key>compileBitcode</key>
-            <false/>
-          <key>thinning</key>
-            <string><none></string>
-        </dict>
-        </plist>
-        EOF
+      - name: Restore SwiftPM & DerivedData
+        uses: irgaly/xcode-cache@v1
+        with:
+          key: deriveddata-${{ github.sha }}
+          restore-keys: deriveddata-
 
-    - name: Create GitHub Release  
-      id: release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
+      - name: Setup Signing Keychain
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          echo "$APPLE_PASSWORD" | base64 --decode > cert.p12
+          security import cert.p12 -k build.keychain -P "" -T /usr/bin/codesign
 
-    - name: Upload .ipa artifact to Release  
-      uses: softprops/action-gh-release@v1
-      with:
-        files: build/Pwnagotchi/Pwnagotchi.ipa
+      - name: Archive App
+        run: |
+          xcodebuild archive \
+            -workspace ios-pwnagotchi.xcodeproj \
+            -scheme Pwnagotchi \
+            -configuration Release \
+            -derivedDataPath DerivedData \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            -allowProvisioningUpdates \
+            -archivePath build/Pwnagotchi.xcarchive
 
-    - name: Update apps.json on gh-pages  
-      run: |
-        git config user.name "github-actions"
-        git config user.email "actions@github.com"
-        git clone --branch gh-pages --single-branch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} gh-pages
-        jq --arg url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Pwnagotchi.ipa" \
-           '.apps[0].downloadURL=$url | .apps[0].version=env.VERSION' gh-pages/source/apps.json > tmp.json
-        mv tmp.json gh-pages/source/apps.json
-        cd gh-pages
-        git add source/apps.json
-        git commit -m "Update apps.json for ${{ github.ref_name }}"
-        git push
+      - name: Export .ipa
+        id: export
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/Pwnagotchi.xcarchive \
+            -exportPath build \
+            -exportOptionsPlist ExportOptions.plist
+          echo "::set-output name=ipa-path::build/Pwnagotchi.ipa"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Pwnagotchi-ipa
+          path: ${{ steps.export.outputs.ipa-path }}
+
+  release:
+    name: Release to GitHub
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download IPA Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: Pwnagotchi-ipa
+
+      - name: Create GitHub Release
+        id: gh_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+
+      - name: Upload IPA to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: Pwnagotchi-ipa/Pwnagotchi.ipa
+
+      - name: Update SideStore apps.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --branch gh-pages --single-branch https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} gh-pages
+          jq --arg url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Pwnagotchi.ipa" \
+             '.apps[0].downloadURL=$url | .apps[0].version="${GITHUB_REF#refs/tags/}"' \
+             gh-pages/source/apps.json > tmp.json
+          mv tmp.json gh-pages/source/apps.json
+          cd gh-pages
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add source/apps.json
+          git commit -m "Update apps.json for ${{ github.ref_name }}"
+          git push
