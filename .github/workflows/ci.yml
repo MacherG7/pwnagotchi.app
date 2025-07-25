@@ -1,0 +1,97 @@
+name: Build & Release Pwnagotchi.app
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+      DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+      EXPORT_METHOD: ${{ secrets.EXPORT_METHOD }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up signing\n📋
+      run: |
+        sudo xcode-select -switch /Applications/Xcode.app
+        security create-keychain -p "" build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "" build.keychain
+        security import <(echo $APPLE_PASSWORD | base64 --decode) \
+          -k build.keychain \
+          -P "" -T /usr/bin/codesign
+
+    - name: Build .ipa via xcodebuild  
+      run: |
+        xcodebuild \
+          -workspace ios-pwnagotchi.xcodeproj \
+          -scheme Pwnagotchi \
+          -configuration Release \
+          -derivedDataPath build \
+          -sdk iphoneos \
+          CODE_SIGN_STYLE=Automatic \
+          DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+          PROVISIONING_PROFILE_SPECIFIER="" \
+          -allowProvisioningUpdates \
+          archive -archivePath build/Pwnagotchi.xcarchive
+
+        xcodebuild \
+          -exportArchive \
+          -archivePath build/Pwnagotchi.xcarchive \
+          -exportPath build/Pwnagotchi \
+          -exportOptionsPlist <<EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" 
+          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+          <key>signingStyle</key>
+            <string>manual</string>
+          <key>teamID</key>
+            <string>${DEVELOPMENT_TEAM}</string>
+          <key>compileBitcode</key>
+            <false/>
+          <key>thinning</key>
+            <string><none></string>
+        </dict>
+        </plist>
+        EOF
+
+    - name: Create GitHub Release  
+      id: release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+
+    - name: Upload .ipa artifact to Release  
+      uses: softprops/action-gh-release@v1
+      with:
+        files: build/Pwnagotchi/Pwnagotchi.ipa
+
+    - name: Update apps.json on gh-pages  
+      run: |
+        git config user.name "github-actions"
+        git config user.email "actions@github.com"
+        git clone --branch gh-pages --single-branch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} gh-pages
+        jq --arg url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Pwnagotchi.ipa" \
+           '.apps[0].downloadURL=$url | .apps[0].version=env.VERSION' gh-pages/source/apps.json > tmp.json
+        mv tmp.json gh-pages/source/apps.json
+        cd gh-pages
+        git add source/apps.json
+        git commit -m "Update apps.json for ${{ github.ref_name }}"
+        git push
